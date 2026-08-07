@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Abyss Runner</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="app">
+  <canvas id="game"></canvas>
+
+  <!-- Live HUD -->
+  <div id="hud">
+    <div class="hud-block">
+      <div class="hud-label">Score</div>
+      <div class="hud-score" id="scoreVal">0</div>
+      <div class="hud-best" id="bestVal"></div>
+    </div>
+    <div id="comboChip" class="tier-1">&times;0</div>
+  </div>
+
+  <div id="bottomHud">
+    <div class="mini-stat"><div class="v" id="distVal">0m</div><div class="l">Distance</div></div>
+    <div class="mini-stat"><div class="v" id="speedVal">0</div><div class="l">Speed</div></div>
+    <div class="mini-stat"><div class="v" id="orbVal">0</div><div class="l">Orbs</div></div>
+  </div>
+
+  <!-- Stats / Game Over Screen -->
+  <div id="statsScreen" class="overlay-screen hidden">
+    <div id="statsPanel">
+      <div class="stats-header">
+        <span class="stats-title">Run Ended</span><span class="new-best-tag" id="bestTag" style="display:none;">NEW BEST</span>
+      </div>
+      <div class="final-score" id="finalScore">0</div>
+
+      <div class="metrics-grid">
+        <div class="metric-cell"><div class="mv" id="mDistance">0m</div><div class="ml">Distance</div></div>
+        <div class="metric-cell"><div class="mv" id="mTime">0s</div><div class="ml">Time Survived</div></div>
+        <div class="metric-cell"><div class="mv" id="mTopSpeed">0</div><div class="ml">Top Speed</div></div>
+        <div class="metric-cell"><div class="mv" id="mCombo">0</div><div class="ml">Points</div></div>
+        <div class="metric-cell"><div class="mv" id="mGates">0</div><div class="ml">Gates Cleared</div></div>
+        <div class="metric-cell"><div class="mv" id="mOrbs">0%</div><div class="ml">Orb Accuracy</div></div>
+      </div>
+
+      <div class="history-label">Last runs</div>
+      <div id="historyBars"></div>
+
+      <button id="restartBtn">RUN AGAIN</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  const app = document.getElementById('app');
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+
+  /* =====================================================================
+     SOUND ENGINE — lightweight synthesized SFX, no external audio files.
+     Created lazily on first user interaction (browser autoplay rules).
+     Used for the orb/point collection sound, and for revealing the
+     points table (stats screen) at the end of a run.
+     ===================================================================== */
+  let audioCtx = null;
+  function ensureAudio(){
+    if(!audioCtx){
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if(!AC) return null;
+      audioCtx = new AC();
+    }
+    if(audioCtx.state === 'suspended'){ audioCtx.resume(); }
+    return audioCtx;
+  }
+  function playTone(freq, duration, opts = {}){
+    const ac = ensureAudio();
+    if(!ac) return;
+    const { type = 'sine', gain = 0.16, delay = 0, slideTo = null } = opts;
+    const t0 = ac.currentTime + delay;
+    const osc = ac.createOscillator();
+    const g = ac.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t0);
+    if(slideTo){ osc.frequency.exponentialRampToValueAtTime(slideTo, t0 + duration); }
+    g.gain.setValueAtTime(0, t0);
+    g.gain.linearRampToValueAtTime(gain, t0 + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+    osc.connect(g).connect(ac.destination);
+    osc.start(t0);
+    osc.stop(t0 + duration + 0.02);
+  }
+  function playCollectSound(comboCount){
+    // Pitch rises slightly with combo streak for a satisfying escalation.
+    const base = 880 * Math.pow(1.06, Math.min(comboCount, 12));
+    playTone(base, 0.09, { type:'triangle', gain:0.15 });
+    playTone(base*1.5, 0.12, { type:'sine', gain:0.10, delay:0.03 });
+  }
+  function playRevealSound(){
+    // Plays when the points table (stats/gameover screen) is revealed —
+    // a soft downward slide for a disappointing, run-is-over feel.
+    playTone(320, 0.18, { type:'sine', gain:0.14, slideTo:210 });
+    playTone(220, 0.22, { type:'sine', gain:0.10, delay:0.05, slideTo:160 });
+  }
+
+  const statsScreen = document.getElementById('statsScreen');
+  const hud = document.getElementById('hud');
+  const bottomHud = document.getElementById('bottomHud');
+  const restartBtn = document.getElementById('restartBtn');
+
+  const scoreVal = document.getElementById('scoreVal');
+  const bestVal = document.getElementById('bestVal');
+  const comboChip = document.getElementById('comboChip');
+  const distVal = document.getElementById('distVal');
+  const speedVal = document.getElementById('speedVal');
+  const orbVal = document.getElementById('orbVal');
+
+  let W=0, H=0, DPR=1;
+  function resize(){
+    const rect = app.getBoundingClientRect();
+    W = rect.width; H = rect.height;
+    DPR = Math.min(window.devicePixelRatio||1, 2);
+    canvas.width = W*DPR; canvas.height = H*DPR;
+    canvas.style.width = W+'px'; canvas.style.height = H+'px';
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---------------- Persistence ----------------
+  let bestScore = 0;
+  let runHistory = [];
+
+  async function loadPersisted(){
+    try{
+      const b = await window.storage.get('abyss-best', false);
+      if(b && b.value){ bestScore = JSON.parse(b.value).score || 0; }
+    }catch(e){ bestScore = 0; }
+    try{
+      const h = await window.storage.get('abyss-history', false);
+      if(h && h.value){ runHistory = JSON.parse(h.value) || []; }
+    }catch(e){ runHistory = []; }
+    bestVal.textContent = bestScore>0 ? ('BEST '+Math.floor(bestScore)) : '';
+  }
+
+  async function savePersisted(finalScore, isNewBest){
+    try{
+      if(isNewBest){
+        await window.storage.set('abyss-best', JSON.stringify({score:finalScore}), false);
+      }
+      runHistory.push({score:finalScore, t:Date.now()});
+      if(runHistory.length>8) runHistory = runHistory.slice(-8);
+      await window.storage.set('abyss-history', JSON.stringify(runHistory), false);
+    }catch(e){}
+  }
+
+  // ---------------- Game constants ----------------
+  const GRAVITY = 1200;
+  const RISE_ACCEL = -2200;
+  const MAX_VY = 560;
+  const BASE_SPEED = 130;
+  const MAX_SPEED = 320;
+  const SPEED_RAMP = 1.3;
+  const PLAYER_R = 14;
+  const GATE_W = 62;
+  const MIN_GAP = 210;
+  const MAX_GAP = 280;
+  const COMBO_WINDOW = 5.5;
+
+  let state = 'start';
+  let player, gates, particles, bubbles;
+  let holding = false;
+  let elapsed = 0, distance = 0, speed = BASE_SPEED, score = 0;
+  let combo = 1, longestCombo = 1, comboTimer = 0, comboPoints = 0;
+  let orbsSpawned = 0, orbsCollected = 0, gatesCleared = 0, topSpeed = BASE_SPEED;
+  let lastTs = 0;
+  let spawnTimer = 0;
+
+  function resetGame(){
+    player = { x: Math.max(70, W*0.22), y: H/2, vy: 0 };
+    gates = [];
+    particles = [];
+    bubbles = [];
+    for(let i=0;i<26;i++){
+      bubbles.push({x:Math.random()*W, y:Math.random()*H, r:1+Math.random()*2.2, s:8+Math.random()*14});
+    }
+    holding = false;
+    elapsed = 0; distance = 0; speed = BASE_SPEED; score = 0;
+    combo = 0; longestCombo = 0; comboTimer = 0; comboPoints = 0;
+    orbsSpawned = 0; orbsCollected = 0; gatesCleared = 0; topSpeed = BASE_SPEED;
+    spawnTimer = 0;
+    spawnGate(W + 200);
+
+    scoreVal.textContent = '0';
+    distVal.textContent = '0m';
+    speedVal.textContent = Math.floor(BASE_SPEED);
+    orbVal.textContent = '0';
+    comboChip.textContent = '\u00d70';
+    comboChip.className = 'tier-1';
+  }
+
+  const SHARD_SEGMENTS = 5;
+  function shardPeaks(){
+    const arr = [];
+    for(let i=0;i<=SHARD_SEGMENTS;i++){ arr.push(0.8 + Math.random()*0.2); }
+    return arr;
+  }
+
+  function spawnGate(x){
+    const gapH = Math.max(MIN_GAP, MAX_GAP - (speed-BASE_SPEED)*0.28);
+    const margin = 60;
+    const gapY = margin + Math.random()*(H - margin*2 - gapH);
+    const hasOrb = Math.random() < 0.7;
+    if(hasOrb) orbsSpawned++;
+    gates.push({ x, w: GATE_W, gapY, gapH, passed:false, hasOrb, orbCollected:false,
+      peaksTop: shardPeaks(), peaksBottom: shardPeaks() });
+  }
+
+  function comboTier(){
+    if(combo>=8) return 3;
+    if(combo>=4) return 2;
+    return 1;
+  }
+  function comboColor(){
+    const tier = comboTier();
+    if(tier===3) return getVar('--gold');
+    if(tier===2) return getVar('--violet');
+    return getVar('--teal');
+  }
+  function getVar(name){
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
+  function updateComboChip(){
+    comboChip.textContent = '\u00d7'+combo;
+    comboChip.className = 'tier-'+comboTier();
+  }
+
+  // ---------------- Input ----------------
+  function pointerDown(){
+    if(state==='playing'){ holding = true; }
+  }
+  function pointerUp(){
+    holding = false;
+  }
+
+  app.addEventListener('pointerdown', pointerDown);
+  window.addEventListener('pointerup', pointerUp);
+  window.addEventListener('keydown', (e)=>{
+    if(e.code==='Space'){ e.preventDefault(); pointerDown(); }
+  });
+  window.addEventListener('keyup', (e)=>{
+    if(e.code==='Space'){ pointerUp(); }
+  });
+
+  restartBtn.addEventListener('click', (e)=>{ e.stopPropagation(); beginGame(); });
+
+  function beginGame(){
+    ensureAudio();
+    resetGame();
+    statsScreen.classList.add('hidden');
+    hud.classList.add('show');
+    bottomHud.classList.add('show');
+    state = 'playing';
+    lastTs = performance.now();
+    requestAnimationFrame(loop);
+  }
+
+  function endGame(){
+    state = 'gameover';
+    hud.classList.remove('show');
+    bottomHud.classList.remove('show');
+    const finalScore = Math.floor(score);
+    const isNewBest = finalScore > bestScore;
+    if(isNewBest) bestScore = finalScore;
+
+    document.getElementById('finalScore').textContent = finalScore;
+    document.getElementById('bestTag').style.display = isNewBest ? 'inline-block':'none';
+    document.getElementById('mDistance').textContent = Math.floor(distance)+'m';
+    document.getElementById('mTime').textContent = elapsed.toFixed(1)+'s';
+    document.getElementById('mTopSpeed').textContent = Math.floor(topSpeed);
+    document.getElementById('mCombo').textContent = orbsCollected;
+    document.getElementById('mGates').textContent = gatesCleared;
+    const orbPct = orbsSpawned>0 ? Math.round(100*orbsCollected/orbsSpawned) : 0;
+    document.getElementById('mOrbs').textContent = orbPct+'%';
+
+    savePersisted(finalScore, isNewBest).then(renderHistory);
+    renderHistory();
+
+    statsScreen.classList.remove('hidden');
+    playRevealSound();
+  }
+
+  function renderHistory(){
+    const wrap = document.getElementById('historyBars');
+    wrap.innerHTML = '';
+    const items = runHistory.slice(-8);
+    const max = Math.max(1, ...items.map(r=>r.score));
+    items.forEach((r,i)=>{
+      const bar = document.createElement('div');
+      bar.className = 'hbar' + (i===items.length-1 ? ' current':'');
+      const h = Math.max(4, Math.round(40*(r.score/max)));
+      bar.style.height = h+'px';
+      wrap.appendChild(bar);
+    });
+  }
+
+  // ---------------- Update ----------------
+  function update(dt){
+    elapsed += dt;
+    speed = Math.min(MAX_SPEED, BASE_SPEED + elapsed*SPEED_RAMP*10);
+    topSpeed = Math.max(topSpeed, speed);
+    distance += speed*dt*0.12;
+
+    player.vy += (holding ? RISE_ACCEL : GRAVITY) * dt;
+    player.vy = Math.max(-MAX_VY, Math.min(MAX_VY, player.vy));
+    player.y += player.vy*dt;
+
+    if(player.y - PLAYER_R < 0 || player.y + PLAYER_R > H){
+      player.y = Math.max(PLAYER_R, Math.min(H-PLAYER_R, player.y));
+      endGame();
+      return;
+    }
+
+    particles.push({x:player.x, y:player.y, life:0.5, r:PLAYER_R*0.55, color:comboColor()});
+    for(let i=particles.length-1;i>=0;i--){
+      const p = particles[i];
+      p.life -= dt;
+      p.x -= speed*dt*0.6;
+      if(p.life<=0) particles.splice(i,1);
+    }
+
+    bubbles.forEach(b=>{
+      b.y -= b.s*dt;
+      b.x -= speed*dt*0.15;
+      if(b.y < -10){ b.y = H+10; b.x = Math.random()*W; }
+      if(b.x < -10){ b.x = W+10; }
+    });
+
+    comboTimer -= dt;
+    if(comboTimer<=0 && combo>0){ combo = 0; updateComboChip(); }
+
+    spawnTimer -= dt;
+    if(spawnTimer<=0){
+      const lastX = gates.length ? gates[gates.length-1].x : W;
+      spawnGate(Math.max(W, lastX) + 230 + Math.random()*60);
+      spawnTimer = 999;
+    }
+    if(gates.length===0 || gates[gates.length-1].x < W-260){
+      spawnGate(W + 40);
+    }
+
+    for(let i=gates.length-1;i>=0;i--){
+      const g = gates[i];
+      g.x -= speed*dt;
+
+      const px = player.x, py = player.y;
+      if(px+PLAYER_R > g.x && px-PLAYER_R < g.x+g.w){
+        if(py-PLAYER_R < g.gapY || py+PLAYER_R > g.gapY+g.gapH){
+          endGame();
+          return;
+        }
+      }
+
+      if(g.hasOrb && !g.orbCollected){
+        const ox = g.x + g.w/2, oy = g.gapY + g.gapH/2;
+        const dx = px-ox, dy = py-oy;
+        if(Math.sqrt(dx*dx+dy*dy) < PLAYER_R+10){
+          g.orbCollected = true;
+          orbsCollected++;
+          combo++;
+          longestCombo = Math.max(longestCombo, combo);
+          comboTimer = COMBO_WINDOW;
+          const bonus = 25*combo;
+          score += bonus;
+          comboPoints += bonus;
+          updateComboChip();
+          comboChip.classList.add('pulse');
+          setTimeout(()=>comboChip.classList.remove('pulse'), 180);
+          playCollectSound(combo);
+        }
+      }
+
+      if(!g.passed && g.x + g.w < px - PLAYER_R){
+        g.passed = true;
+        gatesCleared++;
+        score += 10;
+      }
+
+      if(g.x < -g.w-40) gates.splice(i,1);
+    }
+
+    score += speed*dt*0.06;
+
+    scoreVal.textContent = Math.floor(score);
+    distVal.textContent = Math.floor(distance)+'m';
+    speedVal.textContent = Math.floor(speed);
+    orbVal.textContent = orbsCollected;
+  }
+
+  // ---------------- Draw ----------------
+  function drawBackground(){
+    ctx.fillStyle = '#0e0f13';
+    ctx.fillRect(0,0,W,H);
+
+    ctx.save();
+    bubbles.forEach(b=>{
+      ctx.beginPath();
+      ctx.fillStyle = 'rgba(230,214,190,'+(0.10+0.05*(b.r/3))+')';
+      ctx.arc(b.x,b.y,b.r,0,Math.PI*2);
+      ctx.fill();
+    });
+    ctx.restore();
+  }
+
+  function drawGates(){
+    gates.forEach(g=>{
+      const n = SHARD_SEGMENTS;
+
+      ctx.save();
+      ctx.fillStyle = 'rgba(201,161,90,0.85)';
+      ctx.shadowColor = 'rgba(201,161,90,0.4)';
+      ctx.shadowBlur = 10;
+      ctx.beginPath();
+      ctx.moveTo(g.x, 0);
+      for(let i=0;i<=n;i++){
+        const px = g.x + (g.w*i/n);
+        const py = g.peaksTop[i]*g.gapY;
+        ctx.lineTo(px, py);
+      }
+      ctx.lineTo(g.x+g.w, 0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+
+      const baseBottom = g.gapY+g.gapH;
+      ctx.save();
+      ctx.fillStyle = 'rgba(47,111,94,0.85)';
+      ctx.shadowColor = 'rgba(47,111,94,0.4)';
+      ctx.shadowBlur = 10;
+      ctx.beginPath();
+      ctx.moveTo(g.x, H);
+      for(let i=0;i<=n;i++){
+        const px = g.x + (g.w*i/n);
+        const py = H - g.peaksBottom[i]*(H-baseBottom);
+        ctx.lineTo(px, py);
+      }
+      ctx.lineTo(g.x+g.w, H);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+
+      if(g.hasOrb && !g.orbCollected){
+        const ox = g.x + g.w/2, oy = g.gapY + g.gapH/2;
+        const pulse = 1 + 0.15*Math.sin(elapsed*6);
+        ctx.save();
+        ctx.beginPath();
+        ctx.fillStyle = '#F2C879';
+        ctx.shadowColor = '#F2C879';
+        ctx.shadowBlur = 22;
+        ctx.arc(ox, oy, 7*pulse, 0, Math.PI*2);
+        ctx.fill();
+        ctx.restore();
+      }
+    });
+  }
+
+  function drawPlayer(){
+    particles.forEach(p=>{
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, p.life/0.5)*0.5;
+      ctx.beginPath();
+      ctx.fillStyle = p.color || '#2F6F5E';
+      ctx.arc(p.x, p.y, p.r*(p.life/0.5), 0, Math.PI*2);
+      ctx.fill();
+      ctx.restore();
+    });
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.fillStyle = '#4CE0FF';
+    ctx.shadowColor = '#4CE0FF';
+    ctx.shadowBlur = 28;
+    ctx.arc(player.x, player.y, PLAYER_R, 0, Math.PI*2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.fillStyle = '#FFFFFF';
+    ctx.globalAlpha = 0.9;
+    ctx.arc(player.x-4, player.y-4, PLAYER_R*0.28, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function draw(){
+    drawBackground();
+    drawGates();
+    drawPlayer();
+  }
+
+  function loop(ts){
+    if(state!=='playing') return;
+    let dt = (ts-lastTs)/1000;
+    dt = Math.min(dt, 0.033);
+    lastTs = ts;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  loadPersisted().then(beginGame);
+
+})();
+</script>
+</body>
+</html>
