@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Loading…</title>
+<style>
+  html,body{
+    margin:0; padding:0; width:100%; height:100%;
+    background:#0A0A0E;
+    display:flex; align-items:center; justify-content:center;
+    font-family:sans-serif; color:#F3ECDD;
+  }
+  html, body, * {
+    -webkit-user-select: none !important;
+    -moz-user-select: none !important;
+    user-select: none !important;
+    -webkit-touch-callout: none !important;
+    -webkit-tap-highlight-color: transparent !important;
+  }
+</style>
+</head>
+<body>
+<div>Loading a game…</div>
+<script>
+  // Block text selection / long-press menus (needed on browsers like Vivo
+  // where plain CSS user-select isn't enough).
+  document.addEventListener('contextmenu', function(e){ e.preventDefault(); }, {passive:false});
+  document.addEventListener('selectstart', function(e){ e.preventDefault(); }, {passive:false});
+  document.addEventListener('gesturestart', function(e){ e.preventDefault(); }, {passive:false});
+
+  // Best-effort: collapse the browser's address/nav bar on load, and go
+  // fullscreen on the first tap so it stays hidden after a QR-code visit.
+  window.addEventListener('load', function(){
+    setTimeout(function(){ window.scrollTo(0, 1); }, 0);
+  });
+  function requestGameFullscreen(){
+    var el = document.documentElement;
+    var req = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen;
+    if(req){ try{ req.call(el); }catch(e){} }
+  }
+  document.addEventListener('touchstart', requestGameFullscreen, {once:true, passive:true});
+  document.addEventListener('click', requestGameFullscreen, {once:true, passive:true});
+</script>
+<script>
+  // Add or remove entries here any time — every scan/visit picks one at random.
+  const GAMES = [
+    'abyss-runner/index.html',
+    'spin-wheel/index.html'
+  ];
+  const pick = GAMES[Math.floor(Math.random() * GAMES.length)];
+  window.location.replace(pick);
+</script>
+</body>
+</html>

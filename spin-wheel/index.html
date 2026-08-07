@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Spin & Win</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  html, body, * {
+    -webkit-user-select: none !important;
+    -moz-user-select: none !important;
+    user-select: none !important;
+    -webkit-touch-callout: none !important;
+    -webkit-tap-highlight-color: transparent !important;
+  }
+</style>
+</head>
+<body>
+<script>
+  // Block text selection / long-press menus (needed on browsers like Vivo
+  // where plain CSS user-select isn't enough).
+  document.addEventListener('contextmenu', function(e){ e.preventDefault(); }, {passive:false});
+  document.addEventListener('selectstart', function(e){ e.preventDefault(); }, {passive:false});
+  document.addEventListener('gesturestart', function(e){ e.preventDefault(); }, {passive:false});
+
+  // Best-effort: collapse the browser's address/nav bar on load, and go
+  // fullscreen on the first tap so it stays hidden after a QR-code visit.
+  window.addEventListener('load', function(){
+    setTimeout(function(){ window.scrollTo(0, 1); }, 0);
+  });
+  function requestGameFullscreen(){
+    var el = document.documentElement;
+    var req = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen;
+    if(req){ try{ req.call(el); }catch(e){} }
+  }
+  document.addEventListener('touchstart', requestGameFullscreen, {once:true, passive:true});
+  document.addEventListener('click', requestGameFullscreen, {once:true, passive:true});
+</script>
+
+<div id="app">
+
+  <!-- ================= Start / front screen ================= -->
+  <div id="startScreen" class="screen">
+    <div class="eyebrow">Member Rewards</div>
+    <h1 class="title">Spin &amp; <em>Win</em></h1>
+    <p class="subtitle">Hint: Tap Spin to reveal a discount for your bill. Land on Try Next Time and this round comes up empty — every real prize is applied straight to checkout.</p>
+    <div id="coinPreview"></div>
+    <button id="enterBtn">UNDERSTOOD</button>
+    <p class="fineprint">One spin per bill · Reward applied automatically at checkout</p>
+  </div>
+
+</div>
+
+<script>
+  document.getElementById('enterBtn').addEventListener('click', ()=>{
+    window.location.href = 'wheel.html';
+  });
+</script>
+</body>
+</html>
