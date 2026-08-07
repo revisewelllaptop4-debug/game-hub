@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Abyss Runner</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="app">
+  <canvas id="game"></canvas>
+
+  <!-- Start Screen -->
+  <div id="startScreen" class="overlay-screen">
+    <div class="eyebrow">Bioluminescent Depths</div>
+    <h1 class="title">ABYSS<br>RUNNER</h1>
+    <p class="subtitle">Hint: Hold the screen to rise, release to fall. Escape the coral gates and catch the glowing points to boost your score.</p>
+    <div id="demoArea">
+      <div id="heatmapLeft"></div>
+      <div id="heatmapRight"></div>
+      <div id="pressureFill"></div>
+      <div id="demoGate"></div>
+      <div id="demoGlow"></div>
+      <div id="demoBall"></div>
+      <div id="gestureHint">HOLD</div>
+      <div id="touchZone">
+        <div id="fingerTap"></div>
+      </div>
+    </div>
+    <div class="best-chip" id="startBest" style="display:none;">Personal best &nbsp;<b id="startBestVal">0</b></div>
+    <button class="cta-btn" id="startBtn">TAP TO DIVE</button>
+  </div>
+</div>
+
+<script>
+(function(){
+  const app = document.getElementById('app');
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+
+  const startScreen = document.getElementById('startScreen');
+  const startBtn = document.getElementById('startBtn');
+
+  const startBest = document.getElementById('startBest');
+  const startBestVal = document.getElementById('startBestVal');
+
+  const demoBall = document.getElementById('demoBall');
+  const demoGlow = document.getElementById('demoGlow');
+  const demoArea = document.getElementById('demoArea');
+  const touchZone = document.getElementById('touchZone');
+  const pressureFill = document.getElementById('pressureFill');
+  const heatmapLeft = document.getElementById('heatmapLeft');
+  const heatmapRight = document.getElementById('heatmapRight');
+  const demoGate = document.getElementById('demoGate');
+  const gestureHint = document.getElementById('gestureHint');
+  const fingerTap = document.getElementById('fingerTap');
+
+  let W=0, H=0, DPR=1;
+  function resize(){
+    const rect = app.getBoundingClientRect();
+    W = rect.width; H = rect.height;
+    DPR = Math.min(window.devicePixelRatio||1, 2);
+    canvas.width = W*DPR; canvas.height = H*DPR;
+    canvas.style.width = W+'px'; canvas.style.height = H+'px';
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---------------- Persistence ----------------
+  let bestScore = 0;
+
+  async function loadPersisted(){
+    try{
+      const b = await window.storage.get('abyss-best', false);
+      if(b && b.value){ bestScore = JSON.parse(b.value).score || 0; }
+    }catch(e){ bestScore = 0; }
+    if(bestScore>0){
+      startBest.style.display='block';
+      startBestVal.textContent = Math.floor(bestScore);
+    }
+  }
+  loadPersisted();
+
+  // ---------------- Demo Ball Animation with Heatmap ----------------
+  let demoAnimTime = 0;
+  let demoPhase = 'rise';
+  let demoPhaseTimer = 0;
+  const demoAreaH = 160;
+  const demoBallSize = 26;
+  const demoMinY = 8;
+  const demoMaxY = demoAreaH - demoBallSize - 8;
+  const demoMidY = (demoMinY + demoMaxY) / 2;
+  let demoBallY = demoMidY;
+  let demoBallVy = 0;
+  const DEMO_RISE_SPEED = 75;
+  const DEMO_FALL_SPEED = 95;
+  const DEMO_PAUSE_DURATION = 0.65;
+
+  function updateHeatmap(normalizedY){
+    // normalizedY: 0 = top, 1 = bottom
+    // Heatmap: blue (cold/top) to warm (bottom)
+    const topColor = [30, 60, 100]; // deep blue
+    const midColor = [60, 120, 180]; // mid blue
+    const bottomColor = [76, 180, 255]; // bright blue-white
+    const hotColor = [180, 220, 255]; // near white at touch point
+
+    let r, g, b;
+    if(normalizedY < 0.5){
+      const t = normalizedY * 2;
+      r = Math.round(topColor[0] + (midColor[0] - topColor[0]) * t);
+      g = Math.round(topColor[1] + (midColor[1] - topColor[1]) * t);
+      b = Math.round(topColor[2] + (midColor[2] - topColor[2]) * t);
+    } else {
+      const t = (normalizedY - 0.5) * 2;
+      r = Math.round(midColor[0] + (hotColor[0] - midColor[0]) * t);
+      g = Math.round(midColor[1] + (hotColor[1] - midColor[1]) * t);
+      b = Math.round(midColor[2] + (hotColor[2] - midColor[2]) * t);
+    }
+
+    const colorStr = `rgb(${r},${g},${b})`;
+    heatmapLeft.style.background = `linear-gradient(to bottom, rgba(30,60,100,0.3), ${colorStr} ${normalizedY*100}%, rgba(76,201,255,0.7) 100%)`;
+    heatmapRight.style.background = `linear-gradient(to bottom, rgba(30,60,100,0.3), ${colorStr} ${normalizedY*100}%, rgba(76,201,255,0.7) 100%)`;
+
+    // Pressure fill - shows intensity at bottom
+    const fillHeight = Math.max(8, (1 - normalizedY) * (demoAreaH * 0.7));
+    pressureFill.style.height = fillHeight + 'px';
+    pressureFill.style.opacity = normalizedY < 0.4 ? '0.5' : '0.2';
+
+    // Touch zone glow
+    if(demoPhase === 'rise' || demoPhase === 'pauseTop'){
+      touchZone.classList.add('active');
+    } else {
+      touchZone.classList.remove('active');
+    }
+  }
+
+  // Drives the finger/tap indicator + text hint so the gesture reads clearly:
+  // pressed + "HOLD" while the ball is being lifted, released + "RELEASE" while it falls.
+  function updateGestureIndicator(){
+    const isHolding = (demoPhase === 'rise' || demoPhase === 'pauseTop');
+    if(isHolding){
+      fingerTap.classList.add('pressed');
+      gestureHint.textContent = 'HOLD';
+    } else {
+      fingerTap.classList.remove('pressed');
+      gestureHint.textContent = 'RELEASE';
+    }
+  }
+
+  function updateDemoBall(dt){
+    demoAnimTime += dt;
+    demoPhaseTimer += dt;
+
+    switch(demoPhase){
+      case 'rise':
+        demoBallVy = -DEMO_RISE_SPEED;
+        demoBallY += demoBallVy * dt;
+        if(demoBallY <= demoMinY){
+          demoBallY = demoMinY;
+          demoPhase = 'pauseTop';
+          demoPhaseTimer = 0;
+        }
+        break;
+      case 'pauseTop':
+        demoBallVy = 0;
+        if(demoPhaseTimer >= DEMO_PAUSE_DURATION){
+          demoPhase = 'fall';
+          demoPhaseTimer = 0;
+        }
+        break;
+      case 'fall':
+        demoBallVy = DEMO_FALL_SPEED;
+        demoBallY += demoBallVy * dt;
+        if(demoBallY >= demoMaxY){
+          demoBallY = demoMaxY;
+          demoPhase = 'pauseBottom';
+          demoPhaseTimer = 0;
+        }
+        break;
+      case 'pauseBottom':
+        demoBallVy = 0;
+        if(demoPhaseTimer >= DEMO_PAUSE_DURATION){
+          demoPhase = 'rise';
+          demoPhaseTimer = 0;
+        }
+        break;
+    }
+
+    demoBall.style.top = demoBallY + 'px';
+    demoGlow.style.top = (demoBallY - 9) + 'px';
+
+    updateGestureIndicator();
+
+    // Gate silhouette - positioned in the middle
+    const gateTop = demoAreaH * 0.3;
+    const gateBottom = demoAreaH * 0.7;
+    demoGate.style.top = gateTop + 'px';
+    demoGate.style.height = (gateBottom - gateTop) + 'px';
+    demoGate.style.opacity = '0.35';
+
+    // Update heatmap based on ball position
+    const normalizedY = demoBallY / demoMaxY;
+    updateHeatmap(normalizedY);
+  }
+
+  startBtn.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    window.location.href = 'game.html';
+  });
+
+  // ---------------- Idle / Start screen loop ----------------
+  let startLoopTs = 0;
+  function startScreenLoop(ts){
+    let dt = (ts - startLoopTs) / 1000;
+    if(dt > 0.033) dt = 0.033;
+    if(dt <= 0) dt = 0.016;
+    startLoopTs = ts;
+
+    updateDemoBall(dt);
+
+    ctx.fillStyle = '#0e0f13';
+    ctx.fillRect(0,0,W,H);
+
+    requestAnimationFrame(startScreenLoop);
+  }
+  startLoopTs = performance.now();
+  requestAnimationFrame(startScreenLoop);
+
+})();
+</script>
+</body>
+</html>
